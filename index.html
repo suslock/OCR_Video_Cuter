@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <title>高光生成器</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { background: #f4f6fb; }
+        .main-card { max-width: 780px; margin: 40px auto; border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.10); }
+        .preview-box {
+            width: 300px; height: 180px;
+            border: 2px dashed #0d6efd;
+            position: relative; margin: 10px auto;
+            border-radius: 8px; background: #e9f0ff;
+        }
+        .roi-preview {
+            position: absolute;
+            background: rgba(0,200,80,0.25);
+            border: 2px solid #28a745;
+            border-radius: 4px;
+        }
+        .keywords-editor { font-family: monospace; font-size: 0.97em; }
+        input[type="range"].form-range { height: 8px; }
+        .section-title { font-weight: 700; font-size: 1.05em; margin-bottom: 8px; }
+        #logBox {
+            background: #1e1e2e; color: #a8ff78;
+            font-family: monospace; font-size: 0.85em;
+            border-radius: 8px; padding: 12px;
+            max-height: 260px; overflow-y: auto;
+            white-space: pre-wrap; word-break: break-all;
+        }
+        .spinner-overlay {
+            display: none;
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,0.35);
+            z-index: 9999;
+            align-items: center; justify-content: center;
+            flex-direction: column; gap: 16px;
+        }
+        .spinner-overlay.show { display: flex; }
+        .spinner-overlay .spinner-border { width: 3rem; height: 3rem; }
+        .spinner-overlay p { color: #fff; font-size: 1.1em; }
+    </style>
+</head>
+<body>
+
+<!-- 全屏加载遮罩 -->
+<div class="spinner-overlay" id="loadingOverlay">
+    <div class="spinner-border text-light" role="status"></div>
+    <p>⏳ 正在处理视频，请耐心等待...</p>
+</div>
+
+<div class="container py-4">
+  <div class="card main-card p-4">
+    <h2 class="text-center mb-1">🎯 视频高光生成器</h2>
+    <p class="text-center text-muted mb-4" style="font-size:0.93em;">基于 OCR 关键词自动提取游戏高光片段</p>
+
+    {% if error %}
+    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+      {{ error }}
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+    {% endif %}
+    {% if message %}
+    <div class="alert alert-success alert-dismissible fade show" role="alert">
+      {{ message }}
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+    {% endif %}
+
+    <form method="post" enctype="multipart/form-data" id="highlightForm">
+
+      <!-- 视频文件 -->
+      <div class="mb-4">
+        <label class="form-label section-title">📂 选择视频文件</label>
+        <input class="form-control" type="file" name="video" accept=".mp4,.avi,.mkv,.mov" required>
+        <div class="form-text text-muted">支持 mp4 / avi / mkv / mov</div>
+      </div>
+
+      <!-- 关键词 -->
+      <div class="mb-4">
+        <label class="form-label section-title">
+          🔑 关键词
+          <span class="text-muted fw-normal" style="font-size:0.9em;">（用 <code>/</code> 分隔，不区分大小写）</span>
+        </label>
+        <div class="input-group">
+          <textarea
+            class="form-control keywords-editor"
+            name="keywords_text"
+            rows="2"
+            placeholder="例如：五杀/双杀/triple kill/first blood">{{ form_data.get('keywords_text', '') }}</textarea>
+          <button type="button" class="btn btn-outline-secondary" onclick="importDefaultKeywords()" title="填入默认关键词">
+            默认词
+          </button>
+        </div>
+        <div class="form-text text-muted">点击"默认词"可快速导入游戏常见高光关键词。</div>
+      </div>
+
+      <!-- ROI 裁剪 -->
+      <div class="mb-4">
+        <div class="section-title">✂️ OCR 扫描区域（ROI）
+          <span class="text-muted fw-normal" style="font-size:0.88em;">0=不裁剪，10=完全裁掉</span>
+        </div>
+        <div class="row g-2">
+          {% for dir, name, default in [('top','顶部裁剪',1),('bottom','底部裁剪',1),('left','左侧裁剪',1),('right','右侧裁剪',1)] %}
+          <div class="col-md-3 col-6">
+            <label class="form-label mb-1" id="lbl_{{ dir }}">{{ name }}: <b>{{ form_data.get(dir, default) }}</b>/10</label>
+            <input type="range" class="form-range" name="{{ dir }}" min="0" max="10"
+                   value="{{ form_data.get(dir, default) }}"
+                   oninput="document.getElementById('lbl_{{ dir }}').innerHTML='{{ name }}: <b>'+this.value+'</b>/10'; updatePreview();">
+          </div>
+          {% endfor %}
+        </div>
+        <div class="preview-box mt-2">
+          <div class="roi-preview" id="roiPreview"></div>
+        </div>
+        <div class="form-text text-muted text-center">绿框为实际 OCR 扫描范围</div>
+      </div>
+
+      <!-- 高级参数 -->
+      <div class="mb-4">
+        <div class="section-title">⚙️ 高级参数</div>
+        <div class="row g-3">
+          <div class="col-md-4">
+            <label class="form-label">
+              上下文时长 (秒)
+              <i class="fas fa-question-circle text-muted ms-1" data-bs-toggle="tooltip"
+                 title="检测到关键词后，前后各保留多少秒的视频内容。"></i>
+            </label>
+            <input type="number" step="0.5" min="0.5" max="30" class="form-control"
+                   name="context_sec" value="{{ '%g' % form_data.get('context_sec', 4.0) }}">
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">
+              合并间隔 (秒)
+              <i class="fas fa-question-circle text-muted ms-1" data-bs-toggle="tooltip"
+                 title="两个高光片段间距小于该值时，自动合并为一个片段。"></i>
+            </label>
+            <input type="number" step="0.5" min="0.5" max="30" class="form-control"
+                   name="merge_gap_sec" value="{{ '%g' % form_data.get('merge_gap_sec', 3.0) }}">
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">
+              OCR 采样率 (FPS)
+              <i class="fas fa-question-circle text-muted ms-1" data-bs-toggle="tooltip"
+                 title="每秒抽取几帧做 OCR。值越大越精确但越慢，推荐 1~2。"></i>
+            </label>
+            <input type="number" step="0.5" min="0.5" max="10" class="form-control"
+                   name="sample_fps" value="{{ '%g' % form_data.get('sample_fps', 2.0) }}">
+          </div>
+          <div class="col-md-12">
+            <label class="form-label">
+              OCR 语言包
+              <i class="fas fa-question-circle text-muted ms-1" data-bs-toggle="tooltip"
+                 title="Tesseract 语言包。中英混合用 chi_sim+eng，纯英文用 eng。需已安装对应语言包。"></i>
+            </label>
+            <input type="text" class="form-control" name="lang"
+                   value="{{ form_data.get('lang', 'chi_sim+eng') }}"
+                   placeholder="chi_sim+eng">
+          </div>
+        </div>
+      </div>
+
+      <button type="submit" class="btn btn-primary w-100 py-2" style="font-size:1.1em;">
+        🚀 开始生成高光
+      </button>
+    </form>
+
+    <!-- 实时日志 -->
+    <div id="logSection" class="mt-4" style="display:none;">
+      <div class="section-title">📋 处理日志</div>
+      <div id="logBox"></div>
+    </div>
+
+    <!-- 下载区域 -->
+    <div id="downloadSection" class="mt-3" style="display:none;">
+      <div class="alert alert-success d-flex align-items-center justify-content-between">
+        <span>✅ 高光视频生成成功！</span>
+        <a id="downloadLink" href="#" class="btn btn-success btn-sm">⬇️ 立即下载</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.11.8/dist/umd/popper.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.min.js"></script>
+<script>
+const DEFAULT_KEYWORDS = [
+    "first blood","firstblood","double kill","doublekill","triple kill","triplekill",
+    "quadra kill","quadrakill","penta kill","pentakill","ace","victory","defeat",
+    "killing spree","killingspree","rampage","unstoppable","godlike","legendary",
+    "shut down","shutdown","hasslain","has slain",
+    "第一滴血","双杀","三杀","四杀","五杀","团灭","胜利","失败",
+    "大杀特杀","无人能挡","超神","主宰比赛","终结","击杀"
+];
+
+document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => new bootstrap.Tooltip(el));
+    updatePreview();
+});
+
+function importDefaultKeywords() {
+    const ta = document.querySelector('textarea[name="keywords_text"]');
+    const cur = ta.value.trim();
+    const def = DEFAULT_KEYWORDS.join('/');
+    ta.value = cur ? (cur + '/' + def) : def;
+}
+
+function updatePreview() {
+    const top    = +document.querySelector('input[name="top"]').value / 10;
+    const bottom = +document.querySelector('input[name="bottom"]').value / 10;
+    const left   = +document.querySelector('input[name="left"]').value / 10;
+    const right  = +document.querySelector('input[name="right"]').value / 10;
+    const p = document.getElementById('roiPreview');
+    if (top + bottom >= 1 || left + right >= 1) {
+        p.style.display = 'none';
+    } else {
+        p.style.display = 'block';
+        p.style.top    = (top * 100) + '%';
+        p.style.left   = (left * 100) + '%';
+        p.style.width  = ((1 - left - right) * 100) + '%';
+        p.style.height = ((1 - top - bottom) * 100) + '%';
+    }
+}
+
+document.getElementById('highlightForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const form = this;
+    const keywords = form.querySelector('textarea[name="keywords_text"]').value.trim();
+    if (!keywords) { alert('❌ 请至少输入一个关键词（用 / 分隔）'); return; }
+
+    const submitBtn = form.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>处理中...';
+    document.getElementById('loadingOverlay').classList.add('show');
+    document.getElementById('logSection').style.display = 'none';
+    document.getElementById('downloadSection').style.display = 'none';
+    document.getElementById('logBox').textContent = '';
+
+    try {
+        const res = await fetch('/process', { method: 'POST', body: new FormData(form) });
+        const data = await res.json();
+
+        document.getElementById('logSection').style.display = 'block';
+        document.getElementById('logBox').textContent = (data.logs || []).join('\n');
+
+        if (data.success && data.download_url) {
+            const dl = document.getElementById('downloadSection');
+            document.getElementById('downloadLink').href = data.download_url;
+            dl.style.display = 'block';
+            const a = document.createElement('a');
+            a.href = data.download_url; a.download = 'highlight.mp4';
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        } else {
+            const errDiv = document.createElement('div');
+            errDiv.className = 'alert alert-danger mt-3';
+            errDiv.textContent = '❌ ' + (data.error || '处理失败，请查看日志');
+            form.parentNode.insertBefore(errDiv, document.getElementById('logSection'));
+            setTimeout(() => errDiv.remove(), 8000);
+        }
+    } catch (err) {
+        alert('❌ 网络错误：' + err.message);
+    } finally {
+        document.getElementById('loadingOverlay').classList.remove('show');
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '🚀 开始生成高光';
+    }
+});
+</script>
+</body>
+</html>
